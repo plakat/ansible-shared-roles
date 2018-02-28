@@ -1,0 +1,36 @@
+---
+- name: apt-get udpate
+  apt: update_cache=yes
+#- name: activate https transport for apt
+#  apt: name=apt‐transport‐https state=installed
+- name: activate certificates for apt
+  apt: name=ca-certificates state=installed
+- name: add gpg key
+  apt_key: id=58118E89F3A912897C070ADBF76221572C52609D keyserver=hkp://p80.pool.sks-keyservers.net:80
+- name: add apt repository
+  copy: content="deb https://apt.dockerproject.org/repo ubuntu-xenial main" dest=/etc/apt/sources.list.d/docker.list
+- name: apt-get udpate
+  apt: update_cache=yes
+- name: ensure apt uses the docker repository
+  command: apt-cache policy docker-ce
+- name: remove old package if it exists
+  apt: name=lxc-docker state=absent
+- name: get kernel version
+  command: uname -r
+  register: kernel_version
+  #- name: install linux image-extra for aufs storage driver
+  #apt: name="linux-image-extra-{{ kernel_version.stdout }}" state=present
+  #- name: install linux image-extra-virtual
+  #apt: name="linux-image-extra-virtual" state=present
+- name: install apparmor
+  apt: name=apparmor state=installed
+- name: install docker
+  apt: name=docker-engine state=latest
+- name: start docker service
+  service: state=restarted name=docker enabled=yes
+# see https://askubuntu.com/questions/842305/where-is-iptables-in-ubuntu-16-04#842315
+# https://stackoverflow.com/questions/35810371/kubernetes-dns-error-listing-services-and-endpoints#44305228
+- name: set iptables policy for FORWARD
+  command: iptables -P FORWARD ACCEPT
+- name: write iptables FORWARD policy setting to rc.local
+  lineinfile: insertbefore="exit +0" line="iptables -P FORWARD ACCEPT" dest=/etc/rc.local
