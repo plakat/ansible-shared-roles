@@ -1,0 +1,93 @@
+- set_fact: group_name="{{ item }}"
+
+- name: create keystore per host
+  #command: "{{java_home}}/bin/keytool -importkeystore -deststorepass '{{ keystore_password }}' -destkeypass '{{ keystore_password }}' -destkeystore 'java/{{ item }}.jks' -srckeystore 'java/{{ item }}.p12' -srcstoretype PKCS12 -srcstorepass '{{ ca_password.stdout }}' -alias '{{item }}'"
+  # use extensions to alias certificate to localhost besides the primary name:
+  #command: "{{java_home}}/bin/keytool -importkeystore -deststorepass {{ keystore_password }} -destkeypass {{ keystore_password }} -destkeystore java/{{ item }}.jks -srckeystore java/{{ item }}.p12 -srcstoretype PKCS12 -srcstorepass {{ ca_password.stdout }} -alias {{ item }} -ext san=dns:localhost,{{ item }}{% if hostvars[item].ansible_eth0_ipv4 is defined %},ip:{{ hostvars[item].ansible_eth0_ipv4.address |default ('127.0.0.1') }}{% endif %}"
+  # variant to add a separate localhost cert to keystore as well:
+  #shell: "{{java_home}}/bin/keytool -importkeystore -deststorepass {{ keystore_password }} -destkeypass {{ keystore_password }} -destkeystore java/{{ item }}.jks -srckeystore java/{{ item }}.p12 -srcstoretype PKCS12 -srcstorepass {{ ca_password.stdout }} -alias {{ item }}; {{java_home}}/bin/keytool -importkeystore -deststorepass {{ keystore_password }} -destkeypass {{ keystore_password }} -destkeystore java/{{ item }}.jks -srckeystore java/localhost.p12 -srcstoretype PKCS12 -srcstorepass {{ ca_password.stdout }} -alias localhost "
+  # version to add cacert.pem as CA certificate:
+  shell: "{{java_home}}/bin/keytool -importkeystore -deststorepass {{ keystore_password }} -destkeypass {{ keystore_password }} -destkeystore java/{{ item }}.jks -srckeystore java/{{ item }}.p12 -srcstoretype PKCS12 -srcstorepass {{ ca_password.stdout }} -alias {{ item }}; {{java_home}}/bin/keytool -import --noprompt -trustcacerts -storepass {{ keystore_password }} -keystore java/{{ item }}.jks -file certs/cacert.pem -alias CA; {{java_home}}/bin/keytool -import --noprompt -trustcacerts -storepass {{ keystore_password }} -keystore java/{{ item }}.jks -file certs/ebg.crt -alias EBG"
+  # same as above, but without destkeypass 
+  #shell: "{{java_home}}/bin/keytool -importkeystore -deststorepass {{ keystore_password }} -destkeystore java/{{ item }}.jks -srckeystore java/{{ item }}.p12 -srcstoretype PKCS12 -srcstorepass {{ ca_password.stdout }} -alias {{ item }}; {{java_home}}/bin/keytool -import --noprompt -trustcacerts -storepass {{ keystore_password }} -keystore java/{{ item }}.jks -file certs/cacert.pem -alias CA"
+  args:
+    chdir: "{{ ca_root_dir }}"
+    creates: "java/{{ item }}.jks"
+  with_items:
+    - "{{ groups[group_name] }}"
+  tags: without_sudo
+
+#- name: add localhost key to each hosts keystore
+#  command: "{{java_home}}/bin/keytool -importkeystore -deststorepass {{ keystore_password }} -destkeypass {{ keystore_password }} -destkeystore java/{{ item }}.jks -srckeystore java/{{ item }}.p12 -srcstoretype PKCS12 -srcstorepass {{ ca_password.stdout }} -alias {{ item }}"
+#  args:
+#    chdir: "{{ ca_root_dir }}"
+#    creates: "java/{{ item }}.jks"
+#  with_items:
+#    - "{{ groups[group_name] }}"
+#  tags: without_sudo
+#
+
+# ElasticSearch client needs CA cert in keystore
+# as it seems to ignore the truststore if a keystore is configured
+# TODO: don't create key with keytool but import key generated and signed with openssl
+- name: create java client certificate and include CA cert in generated client keystore
+  shell: "{{java_home}}/bin/keytool -genkey -keyalg RSA -storepass {{ keystore_password }} -keypass {{ keystore_password }} -keystore java/{{ item }}-javaclient.jks -alias {{ item }}-javaclient -dname '{{ client_req_subj_java }}' -validity {{ client_expire_days }} -keysize 2048; {{java_home}}/bin/keytool -import --noprompt -trustcacerts -storepass {{ keystore_password }} -keystore java/{{ item }}-javaclient.jks -file certs/cacert.pem -alias CA"
+  # without keypass as elasticsearch seems to be unable to use key passwords
+  # resulting in a SignatureException: Signature does not match:
+  #shell: "{{java_home}}/bin/keytool -genkey -keyalg RSA -storepass {{ keystore_password }} -keystore java/{{ item }}-javaclient.jks -alias {{ item }}-javaclient -dname '{{ client_req_subj_java }}' -validity {{ client_expire_days }} -keysize 2048; {{java_home}}/bin/keytool -import --noprompt -trustcacerts -storepass {{ keystore_password }} -keystore java/{{ item }}-javaclient.jks -file certs/cacert.pem -alias CA"
+  args:
+    chdir: "{{ ca_root_dir }}"
+    creates: "java/{{ item }}-javaclient.jks"
+  with_items: "{{ group_name }}"
+  tags: without_sudo
+- name: export java client certificate to file
+  command: "{{java_home}}/bin/keytool -export -alias {{item}}-javaclient -file java/{{item}}-javaclient.cer -keystore java/{{item}}-javaclient.jks -storepass {{ keystore_password }}"
+  args:
+    chdir: "{{ ca_root_dir }}"
+    creates: "java/{{ group_name }}-javaclient.cer"
+  with_items: "{{ group_name }}"
+#- name: add CA cert to java-client keystore
+#  command: {{java_home}}/bin/keytool -import --noprompt -trustcacerts -storepass {{ keystore_password }} -keystore java/{{ item }}-javaclient.jks -file certs/cacert.pem -alias CA
+#  args:
+#    chdir: "{{ ca_root_dir }}"
+
+
+- name: clear group truststore
+  file: name="{{ ca_root_dir }}/java/{{ group_name }}-truststore.jks" state=absent
+  tags: without_sudo
+- name: initialize group truststore from sts-truststore
+  shell: "{{ java_home }}/bin/keytool -importkeystore -noprompt -srckeystore {{ ca_root_dir }}/templates/sts-truststore -srcstorepass changeit -destkeystore {{ ca_root_dir }}/java/{{ group_name }}-truststore.jks -deststorepass {{ truststore_password }}"
+#- name: create truststore per hostgroup, containing all hosts of a group
+  #command: "{{java_home}}/bin/keytool" -import --noprompt -trustcacerts -alias {{ item }} -file "certs/{{ item }}.crt" -keystore "java/{{ group_name }}-truststore.jks" -storepass {{ truststore_password }}
+#  command: "{{java_home}}/bin/keytool -import --noprompt -trustcacerts -alias {{ item }} -file certs/{{ item }}.crt -keystore java/{{ group_name }}-truststore.jks -storepass {{ truststore_password }}"
+#  args:
+#    chdir: "{{ ca_root_dir }}"
+#  with_items: "{{ groups[group_name] }}"
+#  tags: without_sudo
+
+- name: add CA to truststore
+  #command: keytool -import --noprompt -trustcacerts -alias {{ item }} -file "certs/{{ item }}" -keystore "java/{{ group_name }}-truststore.jks" -storepass {{ truststore_password }}
+  command: "{{java_home}}/bin/keytool -import --noprompt -trustcacerts -alias {{ item }} -file certs/{{ item }} -keystore java/{{ group_name }}-truststore.jks -storepass {{ truststore_password }}"
+  args:
+    chdir: "{{ ca_root_dir }}"
+  with_items:
+    - "cacert.pem"
+    - "ebg.crt"
+  tags: without_sudo
+
+- name: add client cert to truststore
+  command: "{{java_home}}/bin/keytool -import --noprompt -trustcacerts -alias {{ item }} -file certs/{{ item }}.crt -keystore java/{{ group_name }}-truststore.jks -storepass {{ truststore_password }}"
+  args:
+    chdir: "{{ ca_root_dir }}"
+  with_items:
+    - "{{ group_name }}-client"
+  tags: without_sudo
+
+- name: add java client cert to the truststore
+  command: "{{java_home}}/bin/keytool -import --noprompt -trustcacerts -alias {{ item }} -file java/{{ item }}.cer -keystore java/{{ group_name }}-truststore.jks -storepass {{ truststore_password }}"
+  args:
+    chdir: "{{ ca_root_dir }}"
+  with_items:
+    - "{{ group_name }}-javaclient"
+  tags: without_sudo
+

@@ -1,0 +1,165 @@
+- name: create directory structure
+  file: name={{ item }} state=directory mode=0700
+  with_items:
+    - "{{ ca_root_dir }}"
+    - "{{ ca_root_dir }}/private"
+    - "{{ ca_root_dir }}/certs"
+    - "{{ ca_root_dir }}/newcerts"
+    - "{{ ca_root_dir }}/crl"
+    - "{{ ca_root_dir }}/java"
+    - "{{ ca_root_dir }}/templates"
+  tags: without_sudo
+- name: create openssl database file
+  copy: src=index.txt dest="{{ ca_root_dir }}/index.txt" mode=0600 force=no
+- name: initialize openssl serial
+  copy: src=serial dest="{{ ca_root_dir }}/serial" force=no
+- name: transfer original sts truststore as template for other truststores
+  copy: src=sts-truststore dest="{{ ca_root_dir }}/templates" force=no
+- name: transfer ebg.crt to import into truststores
+  copy: src=ebg.crt dest="{{ ca_root_dir }}/certs" force=no
+- name: generate random password
+  command: openssl rand -base64 24 -out "{{ ca_password_file }}"
+  args:
+    chdir:  "{{ ca_root_dir }}"
+    creates: "{{ ca_password_file }}"
+  tags: without_sudo
+- name: set permissions for CA password file
+  file: name="{{ ca_root_dir }}/{{ ca_password_file }}" mode=0600
+  tags: without_sudo
+- name: read random password from file
+  command: cat "{{ ca_root_dir }}/{{ ca_password_file }}"
+  register: ca_password
+  tags: without_sudo
+- name: copy openssl config
+  template: src="{{ openssl_config_file }}" dest="{{ ca_root_dir }}/{{ openssl_config_file }}" mode=0600
+  tags: without_sudo
+- name: create CA certificate
+  command: openssl req -config {{ openssl_config_file }} -sha256 -new -x509 -extensions v3_ca -keyout {{ ca_key_file }} -out {{ ca_cert_file }} -days {{ ca_cert_expire_days }} -subj {{ca_subj }} -passout "file:{{ ca_password_file }}"
+  args:
+    chdir: "{{ ca_root_dir }}"
+    creates: "{{ ca_key_file }}"
+  tags: without_sudo
+- name: set permissions for CA key file
+  file: name="{{ ca_root_dir }}/{{ ca_key_file }}" mode=0600
+  tags: without_sudo
+- name: set permissions for CA cert file
+  file: name="{{ ca_root_dir }}/{{ ca_cert_file }}" mode=0600
+  tags: without_sudo
+
+- name: create all host keys and signing requests
+  command: openssl req -config {{ openssl_config_file }} -sha256 -new -nodes -keyout private/{{ item }}.key -out "req_{{ item }}.csr" -days {{ host_expire_days }} -subj {{ host_req_subj }}
+  args:
+    chdir: "{{ ca_root_dir }}"
+    creates: "req_{{ item }}.csr"
+  with_items: "{{groups['all']}}"
+  tags: without_sudo
+- name: set access rights for generated keys
+  file: mode=0600 name="{{ ca_root_dir }}/private/{{ item }}.key"
+  with_items: "{{groups['all']}}"
+  tags: without_sudo
+- name: sign all requests with local CA
+  command: openssl ca -config {{ openssl_config_file }} -policy policy_anything -out "certs/{{ item }}.crt" -passin "file:{{ ca_password_file }}" -batch -in "req_{{ item }}.csr" 
+  args:
+    chdir: "{{ ca_root_dir }}"
+    creates: "certs/{{ item }}.crt"
+  with_items: "{{groups['all']}}"
+  tags: without_sudo
+
+#
+## create client cert per group
+##
+#
+- name: create one client cert per host group plus csr
+  command: openssl req -config {{ openssl_config_file }} -sha256 -new -nodes -keyout private/{{ item }}-client.key -out "req_{{ item }}-client.csr" -days {{ host_expire_days }} -subj {{ client_req_subj }}
+  args:
+    chdir: "{{ ca_root_dir }}"
+    creates: "req_{{ item }}-client.csr"
+  with_items:
+    - "cassandra"
+    - "kafka"
+    - "elasticsearch"
+    - "zookeeper"
+  tags: without_sudo
+- name: set access rights for generated client keys
+  file: mode=0600 name="{{ ca_root_dir }}/private/{{ item }}-client.key"
+  with_items:
+    - "cassandra"
+    - "kafka"
+    - "elasticsearch"
+    - "zookeeper"
+  tags: without_sudo
+- name: sign all requests with local CA
+  command: openssl ca -config {{ openssl_config_file }} -policy policy_anything -out "certs/{{ item }}-client.crt" -passin "file:{{ ca_password_file }}" -batch -in "req_{{ item }}-client.csr" 
+  args:
+    chdir: "{{ ca_root_dir }}"
+    creates: "certs/{{ item }}-client.crt"
+  with_items:
+    - "cassandra"
+    - "kafka"
+    - "elasticsearch"
+    - "zookeeper"
+  tags: without_sudo
+
+- name: convert all client certificates to PKCS#12 for Java keystore import
+  command: openssl pkcs12 -export -name "{{ item }}-client" -out "java/{{ item }}-client.p12" -passin "file:{{ ca_password_file }}" -passout "pass:{{ ca_password.stdout }}" -inkey "private/{{ item }}-client.key" -in "certs/{{ item }}-client.crt" -certfile "{{ ca_cert_file }}" 
+  args:
+    chdir: "{{ ca_root_dir }}"
+    creates: "java/{{ item }}-client.p12"
+  with_items:
+    - "cassandra"
+    - "kafka"
+    - "elasticsearch"
+    - "zookeeper"
+  tags: without_sudo
+
+#
+# end of client cert generation
+#
+
+#- name: convert all certificates to PKCS#7
+#  command: openssl crl2pkcs7 -nocrl -out "certs/{{ item }}.p7b" -certfile "{{ item }}.crt"
+#  args:
+#    chdir: "{{ ca_root_dir }}"
+#    creates: "certs/{{ item }}.p7b"
+#  with_items: groups['all']
+
+- name: convert all certificates to PKCS#12 for Java keystore import
+  command: openssl pkcs12 -export -name "{{ item }}" -out "java/{{ item }}.p12" -passin "file:{{ ca_password_file }}" -passout "pass:{{ ca_password.stdout }}" -inkey "private/{{ item }}.key" -in "certs/{{ item }}.crt" -certfile "{{ ca_cert_file }}" 
+  args:
+    chdir: "{{ ca_root_dir }}"
+    creates: "java/{{ item }}.p12"
+  with_items: "{{groups['all']}}"
+  tags: without_sudo
+
+- name: ensure java keystore directory exists
+  file: name="{{ ca_root_dir}}/java" state=directory mode=0700
+  tags: without_sudo
+- name: create one truststore per host group
+  include: create_truststore.yml
+  with_items: 
+    - "cassandra"
+    - "kafka"
+    - "elasticsearch"
+    - "zookeeper"
+  tags: without_sudo
+
+#- name: create keystore per host
+#  command: keytool -importkeystore -deststorepass "{{ keystore_password }}" -destkeypass "{{ keystore_password }}" -destkeystore "java/{{ item }}.jks" -srckeystore "java/{{ item }}.p12" -srcstoretype PKCS12 -srcstorepass "{{ ca_password.stdout }}" -alias "{{item }}"
+#  args:
+#    chdir: "{{ ca_root_dir }}"
+#    creates: "java/{{ item }}.jks"
+#  with_items: 
+#    - "{{ groups['cassandra'] }}"
+#- name: clear group truststore
+#  file: name={{ ca_root_dir }}/java/cassandra-truststore.jks state=absent
+#- name: create truststore per hostgroup, containing all hosts of a group
+#  command: keytool -import --noprompt -trustcacerts -alias {{ item }} -file "certs/{{ item }}.crt" -keystore "java/cassandra-truststore.jks" -storepass {{ truststore_password }}
+#  args:
+#    chdir: "{{ ca_root_dir }}"
+#  with_items: 
+#    - "{{ groups['cassandra'] }}"
+#- name: add CA to truststore
+#  command: keytool -import --noprompt -trustcacerts -alias {{ item }} -file "{{ item }}" -keystore "java/cassandra-truststore.jks" -storepass {{ truststore_password }}
+#  args:
+#    chdir: "{{ ca_root_dir }}"
+#  with_items: "{{ ca_cert_file }}"

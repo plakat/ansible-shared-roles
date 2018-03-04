@@ -1,0 +1,31 @@
+---
+- name: ensure packet cache dir exists
+  file: name="{{ global_install_packetdir }}" state=directory
+- name: copy java installation archive
+  copy: src="{{ java_package_name }}" dest="{{ global_install_packetdir }}/{{ java_package_name }}"
+  tags: without_sudo
+
+- name: unpack server JRE {{java_package_version}}
+  unarchive: src="{{ global_install_packetdir }}/{{ java_package_name }}" copy=no dest="{{ java_install_targetdir }}" 
+  args:
+    creates: "{{ java_install_targetdir }}/jdk1.8.0_{{java_update_version}}"
+  tags: without_sudo
+- name: create link for jre
+  file: src="{{ java_install_targetdir }}/jdk1.8.0_{{java_update_version}}" dest="{{ java_install_targetdir }}/java" state=link
+  tags: without_sudo
+# see https://support.datastax.com/hc/en-us/articles/204226129-Receiving-error-Caused-by-java-lang-IllegalArgumentException-Cannot-support-TLS-RSA-WITH-AES-256-CBC-SHA-with-currently-installed-providers-on-DSE-startup-after-setting-up-client-to-node-encryption
+- name: install JCE
+  copy: src="{{ item }}" dest="{{ java_install_targetdir }}/java/jre/lib/security/"
+  with_items:
+    - "US_export_policy.jar"
+    - "local_policy.jar"
+  tags: without_sudo
+
+- name: define JAVA_HOME in .bash_profile
+  lineinfile: dest="{{ ansible_env.HOME }}/.bash_profile" create=yes line="export JAVA_HOME={{ java_home }}"
+
+- name: define JAVA_HOME in commonsettings.sh
+  lineinfile: dest="{{ global_commonsettings_inc }}" create=yes line="export JAVA_HOME={{ java_home }}"
+
+- name: expand PATH to include JAVA_HOME/bin
+  lineinfile: dest="{{ ansible_env.HOME }}/.bash_profile" create=yes line="export PATH=$PATH:$JAVA_HOME/bin"
