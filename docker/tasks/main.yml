@@ -34,3 +34,11 @@
   command: iptables -P FORWARD ACCEPT
 - name: write iptables FORWARD policy setting to rc.local
   lineinfile: insertbefore="exit +0" line="iptables -P FORWARD ACCEPT" dest=/etc/rc.local
+- name: ensure script dir exists
+  file: name="{{ docker_script_dir }}" state=directory mode=0755
+- name: transfer cleanup script
+  template: src="{{ item }}.tmpl" dest="{{ docker_script_dir }}/{{ item }}" mode=0755
+  with_items:
+    - docker-cleanup.sh
+- name: create cronjob for docker cleanup script
+  cron: day="*" hour="*" minute="31" job="{{ docker_script_dir }}/docker-cleanup.sh" name="docker_cleanup" user="root"
